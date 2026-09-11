@@ -67,10 +67,10 @@ graph TD
 #!/bin/sh
 # Create project structure
 
-mkdir -p src/{core,z3,problems}
+mkdir -p src/core src/z3 src/problems
 mkdir -p lib
-mkdir -p examples/{leetcode,tutorials}
-mkdir -p tests/{unit,integration}
+mkdir -p examples/leetcode examples/tutorials
+mkdir -p tests/unit tests/integration
 mkdir -p docs/diagrams
 mkdir -p scripts
 
@@ -88,6 +88,7 @@ echo "Project structure created!"
   #:use-module (ice-9 match)
   #:use-module (srfi srfi-1)
   #:export (z3-solve
+            z3-sat?
             parse-z3-model
             make-smt-var
             smt-assert
@@ -95,30 +96,62 @@ echo "Project structure created!"
             smt-maximize))
 
 (define (z3-solve smt-code)
-  "Send SMT-LIB2 code to Z3 and return result"
-  (let* ((port (open-pipe* OPEN_BOTH "z3" "-in"))
-         (result (begin
-                   (display smt-code port)
-                   (force-output port)
-                   (let ((response (get-string-all port)))
-                     (close-pipe port)
-                     response))))
-    result))
+  "Send SMT-LIB2 code to Z3 and return its output"
+  ;; Z3 reads the script from a private temporary file.  Writing to `z3 -in'
+  ;; over one OPEN_BOTH pipe deadlocks: Z3 waits for EOF on its stdin, which
+  ;; stays open while we wait for its output.
+  (catch #t
+    (lambda ()
+      (let* ((port (mkstemp! (string-append (or (getenv "TMPDIR") "/tmp")
+                                            "/z3-input-XXXXXX")))
+             (temp-file (port-filename port)))
+        (dynamic-wind
+          (lambda () #f)
+          (lambda ()
+            (display smt-code port)
+            (close-port port)
+            (let* ((pipe (open-pipe* OPEN_READ "z3" "-smt2" temp-file))
+                   (result (get-string-all pipe)))
+              (close-pipe pipe)
+              result))
+          (lambda ()
+            (when (file-exists? temp-file)
+              (delete-file temp-file))))))
+    (lambda (key . args)
+      (format #t "Error in z3-solve: ~a ~a\n" key args)
+      "unsat")))
+
+(define (z3-sat? output)
+  "True when Z3's first reply is sat (not unsat or unknown)"
+  (let ((status (find (lambda (line) (not (string-null? line)))
+                      (map string-trim-both (string-split output #\newline)))))
+    (and status (string=? status "sat"))))
+
+(define (smt-value value)
+  "Convert a Z3 model value to Scheme"
+  (match value
+    ('true #t)
+    ('false #f)
+    (('- (? number? n)) (- n))
+    (_ value)))
+
+(define (model-entries entries)
+  (filter-map (match-lambda
+                (('define-fun name () _ value) (cons name (smt-value value)))
+                (_ #f))
+              entries))
 
 (define (parse-z3-model output)
   "Parse Z3 model output into an alist"
-  (let ((lines (string-split output #\newline)))
-    (filter-map
-     (lambda (line)
-       (match (string-split line #\space)
-         (("(define-fun" name "()" type value ")")
-          (cons (string->symbol name)
-                (cond ((string=? value "true") #t)
-                      ((string=? value "false") #f)
-                      ((string->number value) => identity)
-                      (else value))))
-         (_ #f)))
-     lines)))
+  ;; Z3 prints each define-fun over several lines, and older releases wrap
+  ;; the model in (model ...), so read s-expressions rather than lines.
+  (let ((port (open-input-string output)))
+    (let loop ((form (read port)))
+      (match form
+        ((? eof-object?) '())
+        (('model . entries) (model-entries entries))
+        (((? pair?) ...) (model-entries form))
+        (_ (loop (read port)))))))
 
 (define (make-smt-var name type)
   "Generate SMT variable declaration"
@@ -233,6 +266,7 @@ echo "Project structure created!"
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
   #:use-module (z3 interface)
+  #:use-module (core constraint-engine)
   #:export (make-change-dp
             make-change-z3
             make-change-csp))
@@ -305,14 +339,13 @@ echo "Project structure created!"
            (smt-minimize (format #f "(+ ~a)" (string-join coin-vars " ")))
            "\n(check-sat)\n(get-model)\n")))
     (let ((result (z3-solve smt-code)))
-      (if (string-contains result "sat")
+      (if (z3-sat? result)
           (parse-z3-model result)
           #f))))
 
 ;; Native CSP approach
 (define (make-change-csp total coins max-coins)
   "Solve using native constraint solver"
-  (use-modules (core constraint-engine))
   
   (let* ((coin-vars
           (map (lambda (coin i)
@@ -382,6 +415,12 @@ echo "Project structure created!"
 (use-modules (srfi srfi-64)
              (problems change-making))
 
+(define (z3-counts model coins)
+  "Coin counts from a Z3 model, in the order of COINS"
+  (map (lambda (i)
+         (or (assq-ref model (string->symbol (format #f "c~a" i))) 0))
+       (iota (length coins))))
+
 (test-begin "change-making")
 
 (test-equal "DP solution for article example"
@@ -392,15 +431,25 @@ echo "Project structure created!"
   2
   (length (make-change-dp 6 '(1 3 4))))
 
-(test-assert "Z3 finds solution"
-  (make-change-z3 37 '(10 9 1)))
+(test-equal "Z3 finds the 4-coin optimum"
+  '(4 37)
+  (let ((counts (z3-counts (make-change-z3 37 '(10 9 1)) '(10 9 1))))
+    (list (apply + counts) (apply + (map * counts '(10 9 1))))))
 
+(test-equal "Z3 reports no solution when change is impossible"
+  #f
+  (make-change-z3 3 '(2)))
+
+(define failures (test-runner-fail-count (test-runner-current)))
 (test-end "change-making")
+(exit (zero? failures))
 #+END_SRC
 
 * Build and Run
 ** Makefile
-#+BEGIN_SRC makefile :tangle Makefile
+The maintained Makefile is in the repository root.  This block is the
+original sketch and is not tangled, so =make tangle= cannot overwrite it.
+#+BEGIN_SRC makefile :tangle no
 .PHONY: all setup test examples clean
 
 all: setup

@@ -1,6 +1,6 @@
 # Guile Constraint Solver - GNU Make Best Practices
 # Variables
-GUILE := guile3
+GUILE ?= guile3
 GUILE_FLAGS := -L ./src
 EMACS := emacs
 TEST_DIR := tests/unit
@@ -19,6 +19,7 @@ LEAN4_SENTINEL := $(BUILD_DIR)/.lean4-installed
 
 # Phony targets
 .PHONY: help all setup setup-lean4 test examples tutorial graph-coloring clean distclean tangle
+.PHONY: check-tools debug
 .PHONY: lean-build lean-run lean-verify lean-all compare
 
 help: ## Show this help message
@@ -60,13 +61,15 @@ setup: $(SETUP_SENTINEL) ## Run basic project setup
 setup-lean4: $(LEAN4_SENTINEL) ## Install Lean 4 theorem prover
 
 # Testing with pattern rules and automatic variables
+# Tests and examples need only guile and z3 (`make setup' installs them).
+SRC_FILES := $(wildcard $(SRC_DIR)/*/*.scm)
 TEST_SOURCES := $(wildcard $(TEST_DIR)/test-*.scm)
 TEST_TARGETS := $(TEST_SOURCES:$(TEST_DIR)/test-%.scm=$(BUILD_DIR)/test-%.done)
 
 test: $(TEST_TARGETS) ## Run all unit tests
 	@echo "==> All tests completed successfully"
 
-$(BUILD_DIR)/test-%.done: $(TEST_DIR)/test-%.scm $(SETUP_SENTINEL) | $(BUILD_DIR)
+$(BUILD_DIR)/test-%.done: $(TEST_DIR)/test-%.scm $(SRC_FILES) | $(BUILD_DIR) check-tools
 	@echo "==> Running test: $*"
 	@$(GUILE) $(GUILE_FLAGS) $<
 	@touch $@
@@ -81,20 +84,22 @@ tutorial: $(BUILD_DIR)/$(EXAMPLE_DIR)/tutorials/basic-csp.done ## Run tutorial
 
 graph-coloring: $(BUILD_DIR)/$(EXAMPLE_DIR)/leetcode/graph-coloring.done ## Run graph coloring example
 
-$(BUILD_DIR)/%.done: %.scm $(SETUP_SENTINEL) | $(BUILD_DIR)
+$(BUILD_DIR)/%.done: %.scm $(SRC_FILES) | $(BUILD_DIR) check-tools
 	@echo "==> Running example: $<"
 	@mkdir -p $(dir $@)
 	@$(GUILE) $(GUILE_FLAGS) $<
 	@touch $@
 
-# Org-mode tangling with dependency tracking
-TANGLED_FILES := $(shell grep -o ':tangle [^[:space:]]*' setup.org 2>/dev/null | cut -d' ' -f2)
+# Org-mode tangling, on request only.  The tangled files are committed, and
+# tangling writes every block in setup.org, so it must never run as a side
+# effect of another target: that is how the Makefile got overwritten.
+tangle: ## Re-tangle setup.org over the tracked sources (review with git diff)
+	@echo "==> Tangling setup.org"
+	@$(EMACS) --batch -l org --eval "(org-babel-tangle-file \"setup.org\")"
 
-tangle: $(TANGLED_FILES) ## Tangle org-mode files
-
-$(TANGLED_FILES): setup.org
-	@echo "==> Tangling $@ from $<"
-	@$(EMACS) --batch -l org --eval "(org-babel-tangle-file \"$<\")"
+check-tools: ## Check that guile and z3 are installed
+	@command -v $(GUILE) >/dev/null || { echo "$(GUILE) not found; run: make setup"; exit 1; }
+	@command -v z3 >/dev/null || { echo "z3 not found; run: make setup"; exit 1; }
 
 # Cleaning with proper dependency order
 clean: ## Clean build artifacts and compiled files
@@ -146,5 +151,4 @@ debug: ## Show Makefile variables for debugging
 	@echo "TEST_SOURCES: $(TEST_SOURCES)"
 	@echo "TEST_TARGETS: $(TEST_TARGETS)"
 	@echo "EXAMPLE_SOURCES: $(EXAMPLE_SOURCES)"
-	@echo "TANGLED_FILES: $(TANGLED_FILES)"
 	@echo "LAKE: $(LAKE)"

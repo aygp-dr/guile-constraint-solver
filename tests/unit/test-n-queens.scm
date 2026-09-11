@@ -35,4 +35,6 @@
                   (iota 4))))
         #f)))
 
+(define failures (test-runner-fail-count (test-runner-current)))
 (test-end "n-queens")
+(exit (zero? failures))

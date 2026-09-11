@@ -4,6 +4,7 @@
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-26)
   #:use-module (z3 interface)
+  #:use-module (core constraint-engine)
   #:export (make-change-dp
             make-change-z3
             make-change-csp))
@@ -76,14 +77,13 @@
            (smt-minimize (format #f "(+ ~a)" (string-join coin-vars " ")))
            "\n(check-sat)\n(get-model)\n")))
     (let ((result (z3-solve smt-code)))
-      (if (string-contains result "sat")
+      (if (z3-sat? result)
           (parse-z3-model result)
           #f))))
 
 ;; Native CSP approach
 (define (make-change-csp total coins max-coins)
   "Solve using native constraint solver"
-  (use-modules (core constraint-engine))
   
   (let* ((coin-vars
           (map (lambda (coin i)

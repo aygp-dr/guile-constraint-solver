@@ -162,7 +162,7 @@
             "\n")
            "\n(check-sat)\n(get-model)\n")))
     (let ((result (z3-solve smt-code)))
-      (if (string-contains result "sat")
+      (if (z3-sat? result)
           (parse-z3-model result)
           #f))))
 
